@@ -1,0 +1,64 @@
+# Environment and sensitive data
+.env
+.env.*
+!.env.example
+.python-version
+.DS_Store
+
+# Data directories
+/data/
+/chromadb-data/
+/logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual Environment
+venv/
+ENV/
+.venv/
+
+# IDE specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+.spyderproject
+.spyproject
+.ropeproject
+.ipynb_checkpoints/
+
+# Local test files
+scratch/
+temp/
+tmp/
+test_output/
+
+# Local storage & databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal

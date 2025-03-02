@@ -1,0 +1,171 @@
+import os
+import time
+import logging
+import json
+import uuid
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+from pathlib import Path
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from qdrant_client import QdrantClient, models
+from qdrant_client.http.models import Distance, VectorParams
+import torch
+import numpy as np
+
+# Configure logging
+logging.basicConfig(
+    filename=os.path.expanduser("~/rag-poc/logs/processing.log"),
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
+
+# Initialize Qdrant client
+client = QdrantClient(host="192.168.1.49", port=6333, grpc_port=6334)
+
+# Collection name
+collection_name = "documents"
+
+# Vector size
+vector_size = 4096  # Adjust based on your model
+
+# Check if the collection exists
+try:
+    collection_info = client.get_collection(collection_name=collection_name)
+    existing_vector_size = collection_info.config.params.vectors_config.size
+    logging.info(f"Collection '{collection_name}' already exists with vector size {existing_vector_size}.")
+    if existing_vector_size != vector_size:
+        logging.warning(f"Collection '{collection_name}' has a different vector size than expected. Please recreate the collection with the correct vector size.")
+        # Delete the collection
+        client.delete_collection(collection_name=collection_name)
+        logging.info(f"Collection '{collection_name}' deleted.")
+        # Create a new collection
+        client.create_collection(
+            collection_name=collection_name,
+            vectors_config=VectorParams(
+                size=vector_size,
+                distance=Distance.COSINE
+            )
+        )
+        logging.info(f"Collection '{collection_name}' created successfully with vector size {vector_size}.")
+    else:
+        logging.info(f"Collection '{collection_name}' already exists with correct vector size {vector_size}.")
+except Exception as e:
+    logging.info(f"Collection '{collection_name}' does not exist. Creating it...")
+    try:
+        # Create a new collection
+        client.create_collection(
+            collection_name=collection_name,
+            vectors_config=VectorParams(
+                size=vector_size,
+                distance=Distance.COSINE
+            )
+        )
+        logging.info(f"Collection '{collection_name}' created successfully with vector size {vector_size}.")
+    except Exception as e:
+        logging.error(f"Failed to create collection '{collection_name}': {e}")
+
+# Load DeepSeek model (fallback to Ollama if needed)
+try:
+    model_name = "deepseek-ai/deepseek-coder-6.7b-instruct"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16).to("cuda")
+    logging.info("Loaded DeepSeek model successfully.")
+except Exception as e:
+    logging.error(f"Failed to load DeepSeek: {e}. Falling back to Ollama...")
+    from ollama import Client
+    ollama = Client(host='http://localhost:11434')
+    model = "llama2"  # Replace with your preferred Ollama model
+
+def generate_metadata(content: str) -> dict:
+    """Use LLM to generate metadata/tags for the document."""
+    prompt = f"""
+    Analyze this document and generate JSON metadata with:
+    - title (concise)
+    - tags (list of 3-5 topics)
+    - summary (1-2 sentences)
+    Document: {content[:2000]}  # Truncate to avoid token limits
+    """
+
+    try:
+        # Try DeepSeek first
+        inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+        outputs = model.generate(**inputs, max_new_tokens=200)
+        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+    except:
+        # Fallback to Ollama
+        response = ollama.generate(model=model, prompt=prompt)['response']
+
+    # Extract JSON from response (assuming model returns valid JSON)
+    try:
+        metadata = json.loads(response.split("{")[1].split("}")[0].strip())
+        return metadata
+    except:
+        return {"title": "Untitled", "tags": [], "summary": ""}
+
+def process_file(file_path: str):
+    """Process a single file and ingest into Qdrant."""
+    try:
+        logging.info(f"Processing: {file_path}")
+        content = Path(file_path).read_text()
+
+        # Generate metadata with LLM
+        metadata = generate_metadata(content)
+
+        # Create embedding using the model
+        inputs = tokenizer(content, return_tensors="pt", truncation=True, max_length=512).to("cuda")
+        with torch.no_grad():
+            outputs = model(**inputs, output_hidden_states=True, return_dict=True)
+        # Use last_hidden_state to generate embeddings
+        embedding = outputs.hidden_states[-1].mean(dim=1).cpu().numpy().tolist()[0]
+
+        # Generate UUID for point ID
+        point_id = uuid.uuid4()
+
+        # Add to Qdrant
+        client.upsert(
+            collection_name=collection_name,
+            wait=True,
+            points=[
+                models.PointStruct(
+                    id=str(point_id),  # Convert UUID to string
+                    vector=embedding,
+                    payload={"content": content, "metadata": metadata}
+                )
+            ]
+        )
+
+        logging.info(f"Successfully ingested {file_path} into Qdrant")
+
+        # Move processed file
+        processed_path = os.path.expanduser(f"~/rag-poc/data/processed/{os.path.basename(file_path)}")
+        os.rename(file_path, processed_path)
+        logging.info(f"Completed: {file_path} -> {processed_path}")
+
+    except Exception as e:
+        logging.error(f"Failed to process {file_path}: {e}")
+
+class FileHandler(FileSystemEventHandler):
+    """Watchdog handler to process new files."""
+    def on_created(self, event):
+        if not event.is_directory:
+            process_file(event.src_path)
+
+if __name__ == "__main__":
+    # Process existing files first
+    raw_dir = os.path.expanduser("~/rag-poc/data/raw")
+    for file in os.listdir(raw_dir):
+        process_file(os.path.join(raw_dir, file))
+
+    # Start watching for new files
+    observer = Observer()
+    observer.schedule(FileHandler(), path=raw_dir, recursive=False)
+    observer.start()
+    logging.info("Started directory watcher.")
+
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        observer.stop()
+    observer.join()
+

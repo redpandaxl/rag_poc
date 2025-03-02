@@ -1,0 +1,13 @@
+[Unit]
+Description=RAG Data Processor
+
+[Service]
+ExecStart=/home/redpanda/rag-poc/venv/bin/python /home/redpanda/rag-poc/scripts/process_data.py
+WorkingDirectory=/home/redpanda/rag-poc
+Restart=always
+User=redpanda
+Environment="PATH=/home/redpanda/rag-poc/venv/bin:$PATH"
+
+[Install]
+WantedBy=multi-user.target
+
