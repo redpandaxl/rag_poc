@@ -39,7 +39,7 @@ For detailed architecture diagrams, see the [mermaid](./mermaid) directory.
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/rag-poc.git
+   git clone https://github.com/redpandaxl/rag-poc.git
    cd rag-poc
    ```
 
